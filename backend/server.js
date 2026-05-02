@@ -12,97 +12,136 @@ const io = new Server(server, {
     cors: { origin: "*" }
 });
 
-// 🚁 Drone State
 const HOME = [17.385, 78.4867];
 
+// ================= DRONE STATE =================
 let drone = {
-    position: [17.385, 78.4867], // start (Hyderabad)
+    position: [...HOME],
     battery: 100,
     speed: 10,
     altitude: 100,
-    status: "idle",
+    status: "idle", // idle | running | paused | returning
     waypoints: [],
     currentIndex: 0
 };
 
-// 🎯 APIs
+// ================= API ROUTES =================
 
+// START
 app.post("/mission/start", (req, res) => {
+    const wp = req.body.waypoints;
+
+    // ✅ fallback if no waypoints
+    if (!wp || wp.length === 0) {
+        drone.waypoints = [
+            [17.4, 78.5]
+        ];
+        console.log("⚠ No waypoints received → using fallback");
+    } else {
+        drone.waypoints = wp;
+    }
+
     drone.status = "running";
-    drone.waypoints = req.body.waypoints || [];
     drone.currentIndex = 0;
-    res.json({ message: "Mission started" });
+
+    console.log("START:", drone.waypoints);
+    res.send("started");
 });
 
+// PAUSE / RESUME
 app.post("/mission/pause", (req, res) => {
-    drone.status = "paused";
-    res.json({ message: "Mission paused" });
+    if (drone.status === "paused") {
+        drone.status = "running";
+    } else if (drone.status === "running") {
+        drone.status = "paused";
+    }
+    res.send("toggled pause");
 });
 
+// ABORT → RETURN HOME
 app.post("/mission/abort", (req, res) => {
     drone.status = "returning";
     drone.waypoints = [HOME];
     drone.currentIndex = 0;
-    res.json({ message: "Mission aborted, returning to home" });
+
+    console.log("RETURNING HOME");
+
+    res.send("returning");
 });
 
-app.get("/mission/status", (req, res) => {
-    res.json(drone);
-});
+// ================= SIMULATION LOOP =================
 
-// 🔁 Simulation Engine
 setInterval(() => {
-  console.log("Simulation tick: status =", drone.status, "waypoints =", drone.waypoints.length);
-  if (
-    (drone.status === "running" || drone.status === "returning") &&
-    drone.waypoints.length > 0
-  ) {
-    console.log("Moving: target =", drone.waypoints[drone.currentIndex]);
-    let target = drone.waypoints[drone.currentIndex];
 
-    let [lat, lng] = drone.position;
-    let [tLat, tLng] = target;
+    // RUN ONLY WHEN ACTIVE
+    if (drone.status === "running" || drone.status === "returning") {
 
-    // MOVE DRONE
-    drone.position = [
-      lat + (tLat - lat) * 0.05,
-      lng + (tLng - lng) * 0.05
-    ];
-
-    // TARGET REACHED CHECK
-    if (Math.abs(lat - tLat) < 0.0005 && Math.abs(lng - tLng) < 0.0005) {
-
-      if (drone.status === "running") {
-        drone.currentIndex++;
-
-        if (drone.currentIndex >= drone.waypoints.length) {
-          drone.status = "idle";
+        // ✅ BATTERY ALWAYS DRAINS
+        if (drone.status === "running") {
+            drone.battery -= 0.04;
+        } else {
+            drone.battery -= 0.02;
         }
-      }
 
-      if (drone.status === "returning") {
-        drone.status = "idle";
-        drone.waypoints = [];
-        drone.currentIndex = 0;
-      }
+        if (drone.battery <= 0) {
+            drone.battery = 0;
+            drone.status = "idle";
+        }
+
+        // MOVE ONLY IF WAYPOINT EXISTS
+        if (drone.waypoints.length > 0) {
+
+            let [lat, lng] = drone.position;
+            let [tLat, tLng] = drone.waypoints[drone.currentIndex];
+
+            // movement
+            const speedFactor = drone.status === "returning" ? 0.08 : 0.1;
+
+            let newLat = lat + (tLat - lat) * speedFactor;
+            let newLng = lng + (tLng - lng) * speedFactor;
+
+            drone.position = [newLat, newLng];
+
+            // distance check
+            let dist = Math.abs(newLat - tLat) + Math.abs(newLng - tLng);
+
+            if (dist < 0.0005) {
+
+                if (drone.status === "running") {
+                    drone.currentIndex++;
+
+                    if (drone.currentIndex >= drone.waypoints.length) {
+                        drone.status = "idle";
+                        drone.waypoints = [];
+                    }
+                }
+
+                if (drone.status === "returning") {
+                    drone.status = "idle";
+                    drone.waypoints = [];
+                    drone.currentIndex = 0;
+                }
+            }
+        }
+
+        // telemetry changes
+        drone.speed = 10 + Math.random() * 3;
+        drone.altitude = 100 + Math.random() * 10;
     }
 
-    // TELEMETRY UPDATE
-    drone.battery -= 0.05;
-  }
+    // EMIT TO FRONTEND
+    io.emit("telemetry", drone);
 
-  // Always update speed and altitude
-  drone.speed = 10 + Math.random() * 5;
-  drone.altitude = 100 + Math.random() * 20;
+    console.log(
+        "STATUS:", drone.status,
+        "POS:", drone.position,
+        "BAT:", drone.battery.toFixed(2)
+    );
 
-  io.emit("telemetry", { ...drone });
-
-  console.log("STATUS:", drone.status, "POS:", drone.position, "BAT:", drone.battery);
 }, 1000);
 
-// 🔌 Socket connection
-io.on("connection", (socket) => {
-    console.log("Client connected");
-});
+// ================= START SERVER =================
 
-server.listen(5000, () => console.log("Server running on port 5000"));
+server.listen(5000, () => {
+    console.log("🚀 Backend running on http://localhost:5000");
+});
